@@ -1,5 +1,6 @@
 import logging
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from uuid import uuid1
@@ -14,6 +15,7 @@ class Session:
     session_id: str
     driver: WebDriver
     created_at: datetime
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
     def lifetime(self) -> timedelta:
         return datetime.now() - self.created_at

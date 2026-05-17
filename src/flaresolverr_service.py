@@ -229,6 +229,8 @@ def _cmd_sessions_destroy(req: V1RequestBase) -> V1ResponseBase:
 def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
     timeout = int(req.maxTimeout) / 1000
     driver = None
+    session = None
+    lock_acquired = False
     try:
         if req.session:
             session_id = req.session
@@ -241,6 +243,8 @@ def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
                 logging.debug(f"existing session is used to perform the request (session_id={session_id}, "
                               f"lifetime={str(session.lifetime())}, ttl={str(ttl)})")
 
+            session.lock.acquire()
+            lock_acquired = True
             driver = session.driver
         else:
             driver = utils.get_webdriver(req.proxy)
@@ -251,7 +255,10 @@ def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
     except Exception as e:
         raise Exception('Error solving the challenge. ' + str(e).replace('\n', '\\n'))
     finally:
-        if not req.session and driver is not None:
+        if session is not None:
+            if lock_acquired:
+                session.lock.release()
+        elif driver is not None:
             if utils.PLATFORM_VERSION == "nt":
                 driver.close()
             driver.quit()
@@ -305,10 +312,16 @@ def _get_turnstile_token(driver: WebDriver, tabs: int):
 
         # reset focus
         driver.execute_script("""
+            let old = document.getElementById('__focus_helper');
+            if (old) old.remove();
+
             let el = document.createElement('button');
-            el.style.position='fixed';
-            el.style.top='0';
-            el.style.left='0';
+            el.id = '__focus_helper';
+            el.style.position = 'fixed';
+            el.style.top = '0';
+            el.style.left = '0';
+            el.style.opacity = '0.01';
+            el.style.pointerEvents = 'none';
             document.body.prepend(el);
             el.focus();
         """)
@@ -463,6 +476,10 @@ def _evil_logic(req: V1RequestBase, driver: WebDriver, method: str) -> Challenge
         logging.info("Challenge not detected!")
         res.message = "Challenge not detected!"
 
+    if req.waitInSeconds and req.waitInSeconds > 0:
+        logging.info("Waiting " + str(req.waitInSeconds) + " seconds before returning the response...")
+        time.sleep(req.waitInSeconds)
+
     challenge_res = ChallengeResolutionResultT({})
     challenge_res.url = driver.current_url
     challenge_res.status = 200  # todo: fix, selenium not provides this info
@@ -472,11 +489,6 @@ def _evil_logic(req: V1RequestBase, driver: WebDriver, method: str) -> Challenge
 
     if not req.returnOnlyCookies:
         challenge_res.headers = {}  # todo: fix, selenium not provides this info
-
-        if req.waitInSeconds and req.waitInSeconds > 0:
-            logging.info("Waiting " + str(req.waitInSeconds) + " seconds before returning the response...")
-            time.sleep(req.waitInSeconds)
-
         challenge_res.response = driver.page_source
 
     if req.returnScreenshot:
