@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import urllib.parse
 
 from selenium.webdriver.chrome.webdriver import WebDriver
@@ -18,6 +19,7 @@ CHROME_MAJOR_VERSION = None
 USER_AGENT = None
 XVFB_DISPLAY = None
 PATCHED_DRIVER_PATH = None
+_DRIVER_PATCH_LOCK = threading.Lock()
 
 
 def get_config_log_html() -> bool:
@@ -150,6 +152,9 @@ def get_webdriver(proxy: dict = None) -> WebDriver:
     options.add_argument('--ignore-certificate-errors')
     options.add_argument('--ignore-ssl-errors')
 
+    # Enable performance logging so we can capture real HTTP status codes and headers (#1162)
+    options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+
     language = os.environ.get('LANG', None)
     if language is not None:
         options.add_argument('--accept-lang=%s' % language)
@@ -205,10 +210,13 @@ def get_webdriver(proxy: dict = None) -> WebDriver:
         raise e
 
     # save the patched driver to avoid re-downloads
+    # Use a lock so concurrent session creation doesn't double-copy or corrupt the file (#896)
     if driver_exe_path is None:
-        PATCHED_DRIVER_PATH = os.path.join(driver.patcher.data_path, driver.patcher.exe_name)
-        if PATCHED_DRIVER_PATH != driver.patcher.executable_path:
-            shutil.copy(driver.patcher.executable_path, PATCHED_DRIVER_PATH)
+        with _DRIVER_PATCH_LOCK:
+            if PATCHED_DRIVER_PATH is None:
+                PATCHED_DRIVER_PATH = os.path.join(driver.patcher.data_path, driver.patcher.exe_name)
+                if PATCHED_DRIVER_PATH != driver.patcher.executable_path:
+                    shutil.copy(driver.patcher.executable_path, PATCHED_DRIVER_PATH)
 
     # clean up proxy extension directory
     if proxy_extension_dir is not None:

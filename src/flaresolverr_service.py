@@ -1,9 +1,11 @@
+import json
 import logging
 import platform
+import re
 import sys
 import time
 from datetime import timedelta
-from html import escape
+from html import escape, unescape
 from urllib.parse import unquote, quote
 
 from func_timeout import FunctionTimedOut, func_timeout
@@ -55,6 +57,34 @@ TURNSTILE_SELECTORS = [
 
 SHORT_TIMEOUT = 1
 SESSIONS_STORAGE = SessionsStorage()
+
+# Chrome wraps non-HTML responses (JSON, plain text) in an HTML viewer page with a <pre> tag.
+_CHROME_VIEWER_RE = re.compile(
+    r'^<html><head>(?:<meta[^>]*>)*</head><body><pre[^>]*>(.*)</pre></body></html>$',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _unwrap_chrome_viewer(html: str) -> str:
+    """Return the raw content if Chrome has wrapped it in its JSON/text viewer, else html."""
+    m = _CHROME_VIEWER_RE.match(html.strip())
+    return unescape(m.group(1)) if m else html
+
+
+def _get_response_info(driver: WebDriver):
+    """Extract real HTTP status code and response headers from CDP performance logs."""
+    try:
+        logs = driver.get_log('performance')
+        for entry in reversed(logs):
+            msg = json.loads(entry['message'])
+            if msg['message']['method'] == 'Network.responseReceived':
+                params = msg['message']['params']
+                if params.get('type') == 'Document':
+                    resp = params['response']
+                    return resp.get('status', 200), resp.get('headers', {})
+    except Exception:
+        pass
+    return 200, {}
 
 
 def test_browser_installation():
@@ -480,16 +510,18 @@ def _evil_logic(req: V1RequestBase, driver: WebDriver, method: str) -> Challenge
         logging.info("Waiting " + str(req.waitInSeconds) + " seconds before returning the response...")
         time.sleep(req.waitInSeconds)
 
+    real_status, real_headers = _get_response_info(driver)
+
     challenge_res = ChallengeResolutionResultT({})
     challenge_res.url = driver.current_url
-    challenge_res.status = 200  # todo: fix, selenium not provides this info
+    challenge_res.status = real_status
     challenge_res.cookies = driver.get_cookies()
     challenge_res.userAgent = utils.get_user_agent(driver)
     challenge_res.turnstile_token = turnstile_token
 
     if not req.returnOnlyCookies:
-        challenge_res.headers = {}  # todo: fix, selenium not provides this info
-        challenge_res.response = driver.page_source
+        challenge_res.headers = real_headers
+        challenge_res.response = _unwrap_chrome_viewer(driver.page_source)
 
     if req.returnScreenshot:
         challenge_res.screenshot = driver.get_screenshot_as_base64()
